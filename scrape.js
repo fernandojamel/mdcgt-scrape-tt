@@ -23,6 +23,15 @@ const SUPABASE_KEY = req("SUPABASE_ANON_KEY");
 const HEADLESS = (process.env.HEADLESS ?? "true").toLowerCase() !== "false";
 const DOWNLOAD_DIR = path.resolve(process.env.DOWNLOAD_DIR || "./downloads");
 
+// Processamento em lotes: a cada BATCH_SIZE funcionários, pausa
+// BATCH_PAUSE_MIN minutos. Útil pra não saturar o T&T e diminuir o risco
+// de detecção/captcha. BATCH_SIZE=0 desativa (processa tudo em sequência).
+//
+// Default: 20 funcionários, pausa de 5 min → pra 52 funcionários roda
+// 20, pausa 5min, mais 20, pausa 5min, mais 12. Total ~20 min.
+const BATCH_SIZE = Number(process.env.BATCH_SIZE ?? "20");
+const BATCH_PAUSE_MIN = Number(process.env.BATCH_PAUSE_MIN ?? "5");
+
 const LOGIN_URL = "https://admin.tiquetaque.app/";
 // IDs das 2 lojas (Tijuca + Metropolitano) no T&T — descobertos via URL
 // quando o filtro "Selecionar todos" estava marcado no dropdown Empregador.
@@ -116,6 +125,20 @@ async function runOnce() {
       } catch (e) {
         fail++;
         console.error(`[scrape] FALHA ${nome}:`, e.message);
+      }
+
+      // Pausa entre lotes (não pausa no último lote — se já completou tudo).
+      const completados = i + 1;
+      if (
+        BATCH_SIZE > 0 &&
+        completados % BATCH_SIZE === 0 &&
+        completados < total
+      ) {
+        const pauseMs = BATCH_PAUSE_MIN * 60 * 1000;
+        console.log(
+          `[scrape] lote de ${BATCH_SIZE} completo (${completados}/${total}). Pausando ${BATCH_PAUSE_MIN}min…`,
+        );
+        await new Promise((r) => setTimeout(r, pauseMs));
       }
     }
     console.log(`[scrape] done: ok=${ok} fail=${fail} de ${total}`);
