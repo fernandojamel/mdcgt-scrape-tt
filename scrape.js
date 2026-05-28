@@ -31,7 +31,12 @@ if (!fs.existsSync(DOWNLOAD_DIR)) {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 }
 
-(async () => {
+// Modo loop: container fica vivo, scrape roda a cada INTERVAL_HOURS.
+// Default 6h (= 4x/dia). Setar INTERVAL_HOURS=0 desativa o loop e roda
+// uma única vez (útil pra teste local com `npm run scrape`).
+const INTERVAL_HOURS = Number(process.env.INTERVAL_HOURS ?? "6");
+
+async function runOnce() {
   const startedAt = new Date();
   console.log(`[scrape] start ${startedAt.toISOString()} headless=${HEADLESS}`);
 
@@ -72,6 +77,27 @@ if (!fs.existsSync(DOWNLOAD_DIR)) {
     console.log(`[scrape] done: ok=${ok} fail=${fail} de ${total}`);
   } finally {
     await browser.close();
+  }
+}
+
+(async () => {
+  if (INTERVAL_HOURS <= 0) {
+    // One-shot (teste local).
+    await runOnce();
+    return;
+  }
+  // Loop: roda, dorme INTERVAL_HOURS, repete.
+  // Falhas pontuais são logadas mas não derrubam o loop.
+  while (true) {
+    try {
+      await runOnce();
+    } catch (err) {
+      console.error("[scrape] erro no run:", err);
+    }
+    const sleepMs = INTERVAL_HOURS * 60 * 60 * 1000;
+    const wakeAt = new Date(Date.now() + sleepMs).toISOString();
+    console.log(`[scrape] sleeping ${INTERVAL_HOURS}h até ${wakeAt}…`);
+    await new Promise((r) => setTimeout(r, sleepMs));
   }
 })().catch((err) => {
   console.error("[scrape] erro fatal:", err);
