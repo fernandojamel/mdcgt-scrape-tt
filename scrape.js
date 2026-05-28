@@ -31,10 +31,45 @@ if (!fs.existsSync(DOWNLOAD_DIR)) {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 }
 
-// Modo loop: container fica vivo, scrape roda a cada INTERVAL_HOURS.
-// Default 6h (= 4x/dia). Setar INTERVAL_HOURS=0 desativa o loop e roda
-// uma única vez (útil pra teste local com `npm run scrape`).
+// Modo loop: 2 opções de agendamento.
+//
+//   SCHEDULE_HOURS="7,12,16,19"  → roda nesses horários fixos (timezone
+//                                   definida via env TZ, default UTC).
+//                                   Após cada run, calcula o próximo
+//                                   horário da lista e dorme até lá.
+//
+//   INTERVAL_HOURS=6             → roda, dorme 6h, repete (drifta no tempo).
+//                                   Default quando SCHEDULE_HOURS não setado.
+//
+//   INTERVAL_HOURS=0             → one-shot (teste local com `npm run scrape`).
+//
+// SCHEDULE_HOURS tem prioridade quando setado.
+const SCHEDULE_HOURS_RAW = (process.env.SCHEDULE_HOURS ?? "").trim();
 const INTERVAL_HOURS = Number(process.env.INTERVAL_HOURS ?? "6");
+
+function parseScheduleHours() {
+  if (!SCHEDULE_HOURS_RAW) return null;
+  const hours = SCHEDULE_HOURS_RAW.split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n >= 0 && n < 24)
+    .sort((a, b) => a - b);
+  return hours.length > 0 ? hours : null;
+}
+
+function nextScheduledTime(hours) {
+  // Usa o timezone local do processo (controlado por env TZ).
+  const now = new Date();
+  for (const h of hours) {
+    const candidate = new Date(now);
+    candidate.setHours(h, 0, 0, 0);
+    if (candidate.getTime() > now.getTime()) return candidate;
+  }
+  // Todos os horários do dia já passaram — primeiro do próximo dia.
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(hours[0], 0, 0, 0);
+  return tomorrow;
+}
 
 async function runOnce() {
   const startedAt = new Date();
@@ -81,12 +116,23 @@ async function runOnce() {
 }
 
 (async () => {
-  if (INTERVAL_HOURS <= 0) {
+  const scheduleHours = parseScheduleHours();
+
+  if (!scheduleHours && INTERVAL_HOURS <= 0) {
     // One-shot (teste local).
     await runOnce();
     return;
   }
-  // Loop: roda, dorme INTERVAL_HOURS, repete.
+
+  if (scheduleHours) {
+    console.log(
+      `[scrape] modo schedule: horas=${scheduleHours.join(",")} tz=${process.env.TZ ?? "UTC"}`,
+    );
+  } else {
+    console.log(`[scrape] modo intervalo: ${INTERVAL_HOURS}h`);
+  }
+
+  // Loop: roda, calcula próximo wake, dorme, repete.
   // Falhas pontuais são logadas mas não derrubam o loop.
   while (true) {
     try {
@@ -94,9 +140,17 @@ async function runOnce() {
     } catch (err) {
       console.error("[scrape] erro no run:", err);
     }
-    const sleepMs = INTERVAL_HOURS * 60 * 60 * 1000;
-    const wakeAt = new Date(Date.now() + sleepMs).toISOString();
-    console.log(`[scrape] sleeping ${INTERVAL_HOURS}h até ${wakeAt}…`);
+
+    let wakeAt;
+    if (scheduleHours) {
+      wakeAt = nextScheduledTime(scheduleHours);
+    } else {
+      wakeAt = new Date(Date.now() + INTERVAL_HOURS * 60 * 60 * 1000);
+    }
+    const sleepMs = Math.max(wakeAt.getTime() - Date.now(), 1000);
+    console.log(
+      `[scrape] sleeping até ${wakeAt.toISOString()} (${wakeAt.toLocaleString("pt-BR")})…`,
+    );
     await new Promise((r) => setTimeout(r, sleepMs));
   }
 })().catch((err) => {
