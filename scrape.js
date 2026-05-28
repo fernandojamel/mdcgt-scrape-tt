@@ -24,8 +24,17 @@ const HEADLESS = (process.env.HEADLESS ?? "true").toLowerCase() !== "false";
 const DOWNLOAD_DIR = path.resolve(process.env.DOWNLOAD_DIR || "./downloads");
 
 const LOGIN_URL = "https://admin.tiquetaque.app/";
+// IDs das 2 lojas (Tijuca + Metropolitano) no T&T — descobertos via URL
+// quando o filtro "Selecionar todos" estava marcado no dropdown Empregador.
+// Sem esses IDs no querystring, T&T mostra um subset (default = 25 em
+// vez de 52). Com sites explícitos, vem todo mundo.
+const TT_SITE_IDS = [
+  "68fb6d4831069fa3d236828d",
+  "6890f137f2882b5b5ed2fc9f",
+];
 const LISTING_URL =
-  "https://admin.tiquetaque.app/time-closures?partial=true&period=current&periodFilter=true";
+  "https://admin.tiquetaque.app/time-closures?partial=true&period=current&periodFilter=true&sites=" +
+  TT_SITE_IDS.join(",");
 
 if (!fs.existsSync(DOWNLOAD_DIR)) {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
@@ -160,45 +169,13 @@ async function runOnce() {
 
 // ===================== Steps =====================
 
-/// Navega pra lista e garante filtros: empregadores TODOS marcados,
-/// inativos NÃO incluídos. Como o T&T pode preservar o estado entre
-/// navegações, fazemos isso em toda iteração pra ser idempotente.
+/// Navega pra lista. URL já inclui filtro `sites=` com os 2 IDs, então
+/// trazemos os 52 colaboradores ativos das 2 lojas. Inativos ficam de
+/// fora porque o toggle "Funcionários inativos" é off por default.
 async function goToListingComFiltros(page) {
   await page.goto(LISTING_URL, { waitUntil: "domcontentloaded" });
   await page.getByRole("link", { name: /ver espelho/i }).first()
     .waitFor({ timeout: 30_000 });
-
-  // Abre dropdown Empregador e marca "Selecionar todos" se não estiver.
-  try {
-    await page.getByRole("button", { name: /^empregador$/i }).click({ timeout: 5000 });
-    const selectAll = page.getByText(/selecionar todos/i).first();
-    await selectAll.waitFor({ state: "visible", timeout: 5000 });
-    // Clica só se ainda não estiver marcado (clique alterna). Como não
-    // dá pra inspecionar o checkbox interno facilmente, sempre clicamos
-    // 2x se necessário pra ficar marcado — mas isso pode desmarcar.
-    // Estratégia: marcar 1x; se a contagem da tabela diminuir, é sinal
-    // que desmarcou — desfaz clicando 1x mais.
-    const totalAntes = await page.getByRole("link", { name: /ver espelho/i }).count();
-    await selectAll.click();
-    // Fecha dropdown clicando no botão de novo ou pressionando Escape.
-    await page.keyboard.press("Escape").catch(() => {});
-    await page.waitForTimeout(800);
-    const totalDepois = await page.getByRole("link", { name: /ver espelho/i }).count();
-    if (totalDepois < totalAntes) {
-      // Click desmarcou — clica de novo pra marcar.
-      await page.getByRole("button", { name: /^empregador$/i }).click({ timeout: 5000 });
-      await selectAll.waitFor({ state: "visible", timeout: 5000 });
-      await selectAll.click();
-      await page.keyboard.press("Escape").catch(() => {});
-      await page.waitForTimeout(800);
-    }
-  } catch {
-    // se não tiver dropdown ou já estiver tudo certo, segue.
-  }
-
-  // Garante que a tabela carregou após filtros.
-  await page.getByRole("link", { name: /ver espelho/i }).first()
-    .waitFor({ timeout: 15_000 });
 }
 
 async function login(page) {
