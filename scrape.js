@@ -100,16 +100,17 @@ async function runOnce() {
   try {
     await login(page);
 
-    // Vai pra lista e aplica filtros: todos empregadores marcados,
-    // inativos excluídos (toggle off — já é o default).
-    await goToListingComFiltros(page);
+    // 1ª navegação + aplica filtro Empregador (UMA vez por run).
+    await goToListing(page);
+    await aplicarFiltroEmpregador(page);
     const total = await page.getByRole("link", { name: /ver espelho/i }).count();
     console.log(`[scrape] ${total} funcionários na lista`);
 
     let ok = 0, fail = 0;
     for (let i = 0; i < total; i++) {
-      // Sempre volta pra lista no início da iteração (estado limpo + filtros).
-      await goToListingComFiltros(page);
+      // Volta pra lista no início da iteração (sem reaplicar filtro —
+      // T&T preserva o estado da sessão).
+      await goToListing(page);
       const linkLocator = page.getByRole("link", { name: /ver espelho/i }).nth(i);
       // Captura o nome do funcionário da mesma linha (primeira td).
       const nome = await linkLocator
@@ -192,13 +193,54 @@ async function runOnce() {
 
 // ===================== Steps =====================
 
-/// Navega pra lista. URL já inclui filtro `sites=` com os 2 IDs, então
-/// trazemos os 52 colaboradores ativos das 2 lojas. Inativos ficam de
-/// fora porque o toggle "Funcionários inativos" é off por default.
-async function goToListingComFiltros(page) {
+/// Navega pra lista (sem mexer em filtros). Usada nas iterações do for —
+/// confia que o T&T preserva o estado de filtros da sessão Playwright.
+async function goToListing(page) {
   await page.goto(LISTING_URL, { waitUntil: "domcontentloaded" });
   await page.getByRole("link", { name: /ver espelho/i }).first()
     .waitFor({ timeout: 30_000 });
+}
+
+/// Aplica o filtro "Selecionar todos" no dropdown Empregador.
+/// Chamada UMA VEZ por runOnce (depois do login + 1ª navegação) —
+/// não pode chamar em loop porque o clique é toggle.
+///
+/// A URL inclui `sites=` com os 2 IDs, mas T&T às vezes prioriza o
+/// estado per-user (em sessão fresca como a do Playwright o filtro vem
+/// vazio = 25 colaboradores). Esse clique força o T&T a aplicar o
+/// filtro de todos os sites server-side.
+async function aplicarFiltroEmpregador(page) {
+  try {
+    await page.getByRole("button", { name: /^empregador$/i })
+      .click({ timeout: 5000 });
+    const selectAll = page.getByText(/selecionar todos/i).first();
+    await selectAll.waitFor({ state: "visible", timeout: 5000 });
+
+    // Estratégia auto-corretiva: se a contagem aumenta, marcou tudo (bom).
+    // Se diminui, desmarcou — clica de novo pra remarcar.
+    const verEspelhoLinks = page.getByRole("link", { name: /ver espelho/i });
+    const totalAntes = await verEspelhoLinks.count();
+    await selectAll.click();
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.waitForTimeout(1500);
+    const totalDepois = await verEspelhoLinks.count();
+
+    if (totalDepois < totalAntes) {
+      await page.getByRole("button", { name: /^empregador$/i })
+        .click({ timeout: 5000 });
+      await selectAll.waitFor({ state: "visible", timeout: 5000 });
+      await selectAll.click();
+      await page.keyboard.press("Escape").catch(() => {});
+      await page.waitForTimeout(1500);
+    }
+    console.log(
+      `[scrape] filtro Empregador: antes=${totalAntes} depois=${totalDepois}`,
+    );
+  } catch (e) {
+    console.warn(
+      `[scrape] não consegui aplicar filtro Empregador: ${e.message}`,
+    );
+  }
 }
 
 async function login(page) {
