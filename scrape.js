@@ -212,11 +212,28 @@ async function processarSite(page, site) {
 
 // ===================== Steps =====================
 
-/// Navega pra uma URL de listagem e espera os links "Ver espelho" aparecerem.
+/// Navega pra uma URL de listagem, espera os links "Ver espelho" aparecerem
+/// e rola até o fim da página pra disparar lazy loading. T&T carrega mais
+/// linhas conforme o scroll — sem isso pegamos só os primeiros ~25 visíveis.
 async function goToListingUrl(page, url) {
   await page.goto(url, { waitUntil: "domcontentloaded" });
   await page.getByRole("link", { name: /ver espelho/i }).first()
     .waitFor({ timeout: 30_000 });
+  await scrollUntilAllLoaded(page);
+}
+
+/// Rola até o fim repetidamente até a contagem de "Ver espelho" parar de
+/// crescer. Garante que todos os funcionários da loja foram renderizados.
+async function scrollUntilAllLoaded(page) {
+  const link = page.getByRole("link", { name: /ver espelho/i });
+  let prev = -1;
+  for (let i = 0; i < 15; i++) {
+    const count = await link.count();
+    if (count === prev) break; // sem novo carregamento desde a iteração anterior
+    prev = count;
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForTimeout(1200);
+  }
 }
 
 async function login(page) {
