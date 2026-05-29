@@ -33,17 +33,18 @@ const BATCH_SIZE = Number(process.env.BATCH_SIZE ?? "20");
 const BATCH_PAUSE_MIN = Number(process.env.BATCH_PAUSE_MIN ?? "5");
 
 const LOGIN_URL = "https://admin.tiquetaque.app/";
-// IDs das 2 lojas (Tijuca + Metropolitano) no T&T — descobertos via URL
-// quando o filtro "Selecionar todos" estava marcado no dropdown Empregador.
-// Sem esses IDs no querystring, T&T mostra um subset (default = 25 em
-// vez de 52). Com sites explícitos, vem todo mundo.
-const TT_SITE_IDS = [
-  "68fb6d4831069fa3d236828d",
-  "6890f137f2882b5b5ed2fc9f",
+
+// Lojas (sites) do T&T. Scrapemos UMA por vez — quando passa as 2
+// no URL T&T retorna um subset (25 em vez de 52). Site único funciona.
+const TT_SITES = [
+  { id: "68fb6d4831069fa3d236828d", apelido: "Metropolitano" },
+  { id: "6890f137f2882b5b5ed2fc9f", apelido: "Tijuca" },
 ];
-const LISTING_URL =
-  "https://admin.tiquetaque.app/time-closures?partial=true&period=current&periodFilter=true&sites=" +
-  TT_SITE_IDS.join(",");
+
+function listingUrlForSite(siteId) {
+  return "https://admin.tiquetaque.app/time-closures?partial=true&period=current&periodFilter=true&sites=" +
+    siteId;
+}
 
 if (!fs.existsSync(DOWNLOAD_DIR)) {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
@@ -100,52 +101,70 @@ async function runOnce() {
   try {
     await login(page);
 
-    // 1ª navegação + aplica filtro Empregador (UMA vez por run).
-    await goToListing(page);
-    await aplicarFiltroEmpregador(page);
-    const total = await page.getByRole("link", { name: /ver espelho/i }).count();
-    console.log(`[scrape] ${total} funcionários na lista`);
+    let okGlobal = 0;
+    let failGlobal = 0;
+    let totalGlobal = 0;
 
-    let ok = 0, fail = 0;
-    for (let i = 0; i < total; i++) {
-      // Volta pra lista no início da iteração (sem reaplicar filtro —
-      // T&T preserva o estado da sessão).
-      await goToListing(page);
-      const linkLocator = page.getByRole("link", { name: /ver espelho/i }).nth(i);
-      // Captura o nome do funcionário da mesma linha (primeira td).
-      const nome = await linkLocator
-        .locator("xpath=ancestor::tr//td[1]")
-        .innerText()
-        .then((s) => s.trim())
-        .catch(() => `funcionario_${i}`);
-
-      try {
-        const pdfPath = await downloadEspelhoPrevia(page, linkLocator, nome);
-        await uploadToSupabase(pdfPath, nome);
-        ok++;
-      } catch (e) {
-        fail++;
-        console.error(`[scrape] FALHA ${nome}:`, e.message);
-      }
-
-      // Pausa entre lotes (não pausa no último lote — se já completou tudo).
-      const completados = i + 1;
-      if (
-        BATCH_SIZE > 0 &&
-        completados % BATCH_SIZE === 0 &&
-        completados < total
-      ) {
-        const pauseMs = BATCH_PAUSE_MIN * 60 * 1000;
-        console.log(
-          `[scrape] lote de ${BATCH_SIZE} completo (${completados}/${total}). Pausando ${BATCH_PAUSE_MIN}min…`,
-        );
-        await new Promise((r) => setTimeout(r, pauseMs));
-      }
+    for (const site of TT_SITES) {
+      const r = await processarSite(page, site);
+      okGlobal += r.ok;
+      failGlobal += r.fail;
+      totalGlobal += r.total;
     }
-    console.log(`[scrape] done: ok=${ok} fail=${fail} de ${total}`);
+
+    console.log(
+      `[scrape] done: ok=${okGlobal} fail=${failGlobal} de ${totalGlobal} (2 lojas)`,
+    );
   } finally {
     await browser.close();
   }
+}
+
+/// Processa todos os funcionários de UMA loja. Retorna {ok, fail, total}.
+async function processarSite(page, site) {
+  const listingUrl = listingUrlForSite(site.id);
+  console.log(`[scrape] ===== ${site.apelido} =====`);
+  await goToListingUrl(page, listingUrl);
+  const total = await page.getByRole("link", { name: /ver espelho/i }).count();
+  console.log(`[scrape] ${site.apelido}: ${total} funcionários`);
+
+  let ok = 0, fail = 0;
+  for (let i = 0; i < total; i++) {
+    await goToListingUrl(page, listingUrl);
+    const linkLocator = page.getByRole("link", { name: /ver espelho/i }).nth(i);
+    const nome = await linkLocator
+      .locator("xpath=ancestor::tr//td[1]")
+      .innerText()
+      .then((s) => s.trim())
+      .catch(() => `funcionario_${i}`);
+
+    try {
+      const pdfPath = await downloadEspelhoPrevia(page, linkLocator, nome);
+      await uploadToSupabase(pdfPath, nome);
+      ok++;
+    } catch (e) {
+      fail++;
+      console.error(`[scrape] FALHA ${nome}:`, e.message);
+    }
+
+    const completados = i + 1;
+    if (
+      BATCH_SIZE > 0 &&
+      completados % BATCH_SIZE === 0 &&
+      completados < total
+    ) {
+      const pauseMs = BATCH_PAUSE_MIN * 60 * 1000;
+      console.log(
+        `[scrape] ${site.apelido}: lote de ${BATCH_SIZE} completo (${completados}/${total}). Pausando ${BATCH_PAUSE_MIN}min…`,
+      );
+      await new Promise((r) => setTimeout(r, pauseMs));
+    }
+  }
+
+  console.log(
+    `[scrape] ${site.apelido}: ok=${ok} fail=${fail} de ${total}`,
+  );
+  return { ok, fail, total };
 }
 
 (async () => {
@@ -193,100 +212,11 @@ async function runOnce() {
 
 // ===================== Steps =====================
 
-/// Navega pra lista (sem mexer em filtros). Usada nas iterações do for —
-/// confia que o T&T preserva o estado de filtros da sessão Playwright.
-async function goToListing(page) {
-  await page.goto(LISTING_URL, { waitUntil: "domcontentloaded" });
+/// Navega pra uma URL de listagem e espera os links "Ver espelho" aparecerem.
+async function goToListingUrl(page, url) {
+  await page.goto(url, { waitUntil: "domcontentloaded" });
   await page.getByRole("link", { name: /ver espelho/i }).first()
     .waitFor({ timeout: 30_000 });
-}
-
-/// Aplica o filtro "Selecionar todos" no dropdown Empregador.
-/// Chamada UMA VEZ por runOnce (depois do login + 1ª navegação) —
-/// não pode chamar em loop porque o clique é toggle.
-///
-/// A URL inclui `sites=` com os 2 IDs, mas T&T às vezes prioriza o
-/// estado per-user (em sessão fresca como a do Playwright o filtro vem
-/// vazio = 25 colaboradores). Esse clique força o T&T a aplicar o
-/// filtro de todos os sites server-side.
-async function aplicarFiltroEmpregador(page) {
-  /// Encontra o chip "Empregador" — pode ser button, combobox ou só um
-  /// div com texto. Tenta vários seletores em ordem.
-  async function acharBotaoEmpregador() {
-    const candidatos = [
-      page.getByRole("button", { name: /^empregador$/i }),
-      page.getByRole("combobox", { name: /^empregador$/i }),
-      page.locator(':is(button, [role="button"], [role="combobox"])')
-        .filter({ hasText: /^Empregador$/ }),
-      page.getByText(/^Empregador$/).first(),
-    ];
-    for (const loc of candidatos) {
-      try {
-        await loc.first().waitFor({ state: "visible", timeout: 4000 });
-        return loc.first();
-      } catch {}
-    }
-    return null;
-  }
-
-  /// Clica em "Selecionar todos" — o elemento texto é um <p> dentro de
-  /// um wrapper React clicável. Tenta: click normal → force → JS native.
-  async function clicarSelectAll() {
-    const p = page.getByText(/selecionar todos/i).first();
-    await p.waitFor({ state: "visible", timeout: 8000 });
-    try {
-      await p.click({ timeout: 3000 });
-      return;
-    } catch {}
-    try {
-      await p.click({ force: true, timeout: 3000 });
-      return;
-    } catch {}
-    // Última tentativa: JS native click (no <p> e nos ancestrais).
-    await p.evaluate((el) => {
-      el.click();
-      let parent = el.parentElement;
-      for (let i = 0; i < 3 && parent; i++) {
-        parent.click();
-        parent = parent.parentElement;
-      }
-    });
-  }
-
-  try {
-    const btn = await acharBotaoEmpregador();
-    if (!btn) {
-      console.warn("[scrape] botão 'Empregador' não encontrado");
-      return;
-    }
-    await btn.click();
-
-    // Estratégia auto-corretiva: se a contagem aumenta, marcou tudo (bom).
-    // Se diminui, desmarcou — clica de novo pra remarcar.
-    const verEspelhoLinks = page.getByRole("link", { name: /ver espelho/i });
-    const totalAntes = await verEspelhoLinks.count();
-    await clicarSelectAll();
-    await page.keyboard.press("Escape").catch(() => {});
-    await page.waitForTimeout(2500);
-    const totalDepois = await verEspelhoLinks.count();
-
-    if (totalDepois < totalAntes) {
-      const btn2 = await acharBotaoEmpregador();
-      if (btn2) {
-        await btn2.click();
-        await clicarSelectAll();
-        await page.keyboard.press("Escape").catch(() => {});
-        await page.waitForTimeout(2500);
-      }
-    }
-    console.log(
-      `[scrape] filtro Empregador: antes=${totalAntes} depois=${totalDepois}`,
-    );
-  } catch (e) {
-    console.warn(
-      `[scrape] não consegui aplicar filtro Empregador: ${e.message}`,
-    );
-  }
 }
 
 async function login(page) {
