@@ -210,11 +210,35 @@ async function goToListing(page) {
 /// vazio = 25 colaboradores). Esse clique força o T&T a aplicar o
 /// filtro de todos os sites server-side.
 async function aplicarFiltroEmpregador(page) {
+  /// Encontra o chip "Empregador" — pode ser button, combobox ou só um
+  /// div com texto. Tenta vários seletores em ordem.
+  async function acharBotaoEmpregador() {
+    const candidatos = [
+      page.getByRole("button", { name: /^empregador$/i }),
+      page.getByRole("combobox", { name: /^empregador$/i }),
+      page.locator(':is(button, [role="button"], [role="combobox"])')
+        .filter({ hasText: /^Empregador$/ }),
+      page.getByText(/^Empregador$/).first(),
+    ];
+    for (const loc of candidatos) {
+      try {
+        await loc.first().waitFor({ state: "visible", timeout: 4000 });
+        return loc.first();
+      } catch {}
+    }
+    return null;
+  }
+
   try {
-    await page.getByRole("button", { name: /^empregador$/i })
-      .click({ timeout: 5000 });
+    const btn = await acharBotaoEmpregador();
+    if (!btn) {
+      console.warn("[scrape] botão 'Empregador' não encontrado");
+      return;
+    }
+    await btn.click();
+
     const selectAll = page.getByText(/selecionar todos/i).first();
-    await selectAll.waitFor({ state: "visible", timeout: 5000 });
+    await selectAll.waitFor({ state: "visible", timeout: 8000 });
 
     // Estratégia auto-corretiva: se a contagem aumenta, marcou tudo (bom).
     // Se diminui, desmarcou — clica de novo pra remarcar.
@@ -222,16 +246,18 @@ async function aplicarFiltroEmpregador(page) {
     const totalAntes = await verEspelhoLinks.count();
     await selectAll.click();
     await page.keyboard.press("Escape").catch(() => {});
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(2000);
     const totalDepois = await verEspelhoLinks.count();
 
     if (totalDepois < totalAntes) {
-      await page.getByRole("button", { name: /^empregador$/i })
-        .click({ timeout: 5000 });
-      await selectAll.waitFor({ state: "visible", timeout: 5000 });
-      await selectAll.click();
-      await page.keyboard.press("Escape").catch(() => {});
-      await page.waitForTimeout(1500);
+      const btn2 = await acharBotaoEmpregador();
+      if (btn2) {
+        await btn2.click();
+        await selectAll.waitFor({ state: "visible", timeout: 8000 });
+        await selectAll.click();
+        await page.keyboard.press("Escape").catch(() => {});
+        await page.waitForTimeout(2000);
+      }
     }
     console.log(
       `[scrape] filtro Empregador: antes=${totalAntes} depois=${totalDepois}`,
