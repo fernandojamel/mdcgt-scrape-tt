@@ -229,6 +229,30 @@ async function aplicarFiltroEmpregador(page) {
     return null;
   }
 
+  /// Clica em "Selecionar todos" — o elemento texto é um <p> dentro de
+  /// um wrapper React clicável. Tenta: click normal → force → JS native.
+  async function clicarSelectAll() {
+    const p = page.getByText(/selecionar todos/i).first();
+    await p.waitFor({ state: "visible", timeout: 8000 });
+    try {
+      await p.click({ timeout: 3000 });
+      return;
+    } catch {}
+    try {
+      await p.click({ force: true, timeout: 3000 });
+      return;
+    } catch {}
+    // Última tentativa: JS native click (no <p> e nos ancestrais).
+    await p.evaluate((el) => {
+      el.click();
+      let parent = el.parentElement;
+      for (let i = 0; i < 3 && parent; i++) {
+        parent.click();
+        parent = parent.parentElement;
+      }
+    });
+  }
+
   try {
     const btn = await acharBotaoEmpregador();
     if (!btn) {
@@ -237,26 +261,22 @@ async function aplicarFiltroEmpregador(page) {
     }
     await btn.click();
 
-    const selectAll = page.getByText(/selecionar todos/i).first();
-    await selectAll.waitFor({ state: "visible", timeout: 8000 });
-
     // Estratégia auto-corretiva: se a contagem aumenta, marcou tudo (bom).
     // Se diminui, desmarcou — clica de novo pra remarcar.
     const verEspelhoLinks = page.getByRole("link", { name: /ver espelho/i });
     const totalAntes = await verEspelhoLinks.count();
-    await selectAll.click();
+    await clicarSelectAll();
     await page.keyboard.press("Escape").catch(() => {});
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(2500);
     const totalDepois = await verEspelhoLinks.count();
 
     if (totalDepois < totalAntes) {
       const btn2 = await acharBotaoEmpregador();
       if (btn2) {
         await btn2.click();
-        await selectAll.waitFor({ state: "visible", timeout: 8000 });
-        await selectAll.click();
+        await clicarSelectAll();
         await page.keyboard.press("Escape").catch(() => {});
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(2500);
       }
     }
     console.log(
